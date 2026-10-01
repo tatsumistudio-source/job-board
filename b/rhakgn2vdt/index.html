@@ -40,6 +40,11 @@ main{max-width:1440px;margin:0 auto;padding:20px 24px 60px;display:grid;grid-tem
 .mark{background:var(--warn-soft);color:var(--warn);font-size:12px;border-radius:6px;padding:2px 8px;font-weight:500}
 .sum{font-size:13.5px;color:var(--muted);display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;margin:0}
 .sum.open{-webkit-line-clamp:unset}
+.rec{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+.stars{color:#d9a521;font-size:17px;letter-spacing:1px;margin-right:4px}
+.stars i{color:#ddd6c8;font-style:normal}
+.why{font-size:11.5px;background:#eef4f1;color:var(--accent);border-radius:999px;padding:1px 8px}
+.why.bad{background:var(--warn-soft);color:var(--warn)}
 .skip{margin-left:auto;font:inherit;font-size:12px;color:var(--muted);background:none;border:1px solid var(--line);border-radius:999px;padding:1px 10px;cursor:pointer}
 .skip:hover{color:var(--warn);border-color:var(--warn)}
 .acts{display:flex;gap:8px;flex-wrap:wrap;margin-top:auto}
@@ -57,7 +62,7 @@ main{max-width:1440px;margin:0 auto;padding:20px 24px 60px;display:grid;grid-tem
   <span class="meta">最終更新 10/01 18:58・7日分</span>
   <div class="chips" id="chips"></div>
   <div class="tools">
-    <label>並べ方 <select id="sort"><option value="new">新しい順</option><option value="price">予算の高い順</option><option value="deadline">締め切りの近い順</option></select></label>
+    <label>並べ方 <select id="sort"><option value="score">おすすめ順</option><option value="new">新しい順</option><option value="price">予算の高い順</option><option value="deadline">締め切りの近い順</option></select></label>
     <label><input type="checkbox" id="hideSeen"> 見た・興味なしを隠す</label>
   </div>
 </div></header>
@@ -74,6 +79,47 @@ const fmtDate = s => { const d = new Date(s); return `${d.getMonth()+1}/${d.getD
 const age = s => { if(!s) return '—'; const m = (now - new Date(s))/60000; if(m < 60) return `${Math.max(1,Math.round(m))}分前`; if(m < 2880) return `${Math.round(m/60)}時間前`; return `${Math.round(m/1440)}日前`; };
 const daysLeft = s => s ? Math.ceil((new Date(s + 'T23:59:59+09:00') - now) / 86400000) : null;
 const yen = n => n ? n.toLocaleString('ja-JP') + '円' : '—';
+// おすすめ度（★1〜5）。Actions で AI を動かすと API 課金になるため、決まった計算で付ける（2026-10-01）
+const FIT = {'動画編集':3, '字幕・テロップ':3, 'ショート・切り抜き':2, '文字起こし':2, 'LP・HP制作':2, '台本・構成':1, '文字PV':1, 'サムネ・画像':1};
+const FLOOR = {'動画編集':10000, '字幕・テロップ':5000, 'ショート・切り抜き':5000, '文字起こし':3000, 'LP・HP制作':30000, '台本・構成':3000, '文字PV':10000, 'サムネ・画像':3000};
+function score(j){
+  let p = 0; const why = [], bad = []; let severe = false;
+  const fit = FIT[j.genre] || 0; p += fit;
+  if(fit >= 3) why.push('得意ジャンル'); else if(fit === 2) why.push('作れるジャンル');
+  // CrowdWorks の固定報酬は案件全体の予算なので単価の判定に使わない。本文の「1本◯円」がある時だけ見る
+  const floor = FLOOR[j.genre] || 5000;
+  const unit = j.unit_price ? Number(((j.unit_price.match(/([\d,]+)円/)||[])[1]||'0').replace(/,/g,'')) : null;
+  // 「20,000円/5本」「5本で20,000円」のような書き方からも1本あたりを出す
+  let perUnit = unit;
+  if(!perUnit){ const t = (j.title + ' ' + j.summary).normalize('NFKC');
+    let m = t.match(/([\d,]+)円\s*[\/／]\s*(\d+)\s*本/) || null, n;
+    if(m) perUnit = Number(m[1].replace(/,/g,'')) / Number(m[2]);
+    else if((n = t.match(/(\d+)\s*本で\s*([\d,]+)円/))) perUnit = Number(n[2].replace(/,/g,'')) / Number(n[1]); }
+  const price = perUnit || (j.budget_note ? null : j.price_min);
+  if(price){ if(price >= floor*3){ p += 2; why.push('単価高め'); } else if(price >= floor*1.5){ p += 1; why.push('単価まずまず'); } else if(price < floor){ p -= 1; bad.push('単価低め'); } }
+  if(/継続|長期/.test(j.title + j.summary)){ p += 0.5; why.push('継続案件'); }
+  const h = j.posted_at ? (now - new Date(j.posted_at))/3600000 : null;
+  if(h !== null && h <= 6){ p += 1; why.push('新着'); } else if(h !== null && h >= 72){ p -= 0.5; bad.push('公開から日数あり'); }
+  if(j.hope_number && (j.num_contracts||0) >= j.hope_number){ severe = true; bad.push('枠が埋まっている可能性'); }
+  const left = daysLeft(j.expired_on); if(left !== null && left < 0){ severe = true; bad.push('期限切れ'); }
+  j.marks.forEach(m => {
+    if(m.startsWith('勧誘')){ severe = true; bad.push('勧誘の疑い'); }
+    else if(m.startsWith('出社')){ severe = true; bad.push('出社あり'); }
+    else if(m.startsWith('AI使用禁止')){ p -= 1.5; bad.push('AI使用禁止'); }
+    else if(m.startsWith('顔出し')){ p -= 1; bad.push('顔出しあり'); }
+    else if(m.startsWith('同じ題名')){ p -= 0.5; }
+  });
+  if(severe) p -= 10;
+  return {p, severe, why, bad};
+}
+// ★はボードに載っている案件どうしの順位で付ける（上位15%=★5・次25%=★4・次35%=★3・残り=★2・重大な注意=★1）
+const SCORES = new Map();
+(function rank(){
+  const all = DATA.jobs.map(j => [j.url, score(j)]);
+  const ok = all.filter(([,s]) => !s.severe).sort((a,b) => b[1].p - a[1].p);
+  ok.forEach(([url, s], i) => { const r = (i + 0.5) / ok.length; s.stars = r <= .15 ? 5 : r <= .40 ? 4 : r <= .75 ? 3 : 2; SCORES.set(url, s); });
+  all.filter(([,s]) => s.severe).forEach(([url, s]) => { s.stars = 1; SCORES.set(url, s); });
+})();
 const PLAT = {crowdworks:'CrowdWorks', coconala:'ココナラ', lancers:'ランサーズ'};
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
@@ -88,6 +134,7 @@ function chips(){
 function render(){
   const hide = document.getElementById('hideSeen').checked, sort = document.getElementById('sort').value;
   let jobs = DATA.jobs.filter(j => (genre === 'すべて' || j.genre === genre) && !(hide && seen[j.url]));
+  if(sort === 'score') jobs.sort((a,b) => SCORES.get(b.url).p - SCORES.get(a.url).p);
   if(sort === 'price') jobs.sort((a,b) => (b.price_min||0) - (a.price_min||0));
   if(sort === 'deadline') jobs.sort((a,b) => (daysLeft(a.expired_on) ?? 999) - (daysLeft(b.expired_on) ?? 999));
   const list = document.getElementById('list');
@@ -96,8 +143,10 @@ function render(){
     const left = daysLeft(j.expired_on);
     const filled = j.hope_number ? `${j.num_contracts||0}/${j.hope_number}人` : '—';
     const isNew = lastVisit && new Date(j.first_seen) > new Date(lastVisit);
+    const sc = SCORES.get(j.url);
     return `<article class="card ${seen[j.url] ? 'seen' : ''} ${isNew ? 'is-new' : ''}" data-url="${esc(j.url)}">
       <div class="head"><span class="genre">${esc(j.genre)}</span><span>${esc(PLAT[j.platform] || j.platform)}</span><span>公開 ${age(j.posted_at || j.first_seen)}</span><button class="skip" data-act="skip">${seen[j.url] === 'skip' ? '戻す' : '興味なし'}</button></div>
+      <div class="rec"><span class="stars" aria-label="おすすめ度 ${sc.stars}/5">${'★'.repeat(sc.stars)}<i>${'★'.repeat(5-sc.stars)}</i></span>${sc.why.map(w => `<span class="why">${esc(w)}</span>`).join('')}${sc.bad.map(w => `<span class="why bad">${esc(w)}</span>`).join('')}</div>
       <h2 class="title"><a href="${esc(j.url)}" target="_blank" rel="noopener">${esc(j.title)}</a></h2>
       <div class="nums">
         <div class="num ${j.unit_price ? 'hot' : ''}"><b>${esc(j.unit_price || yen(j.price_min))}</b><span>${j.unit_price ? '1本あたり（本文より）' : (j.budget_note || '報酬')}</span></div>
